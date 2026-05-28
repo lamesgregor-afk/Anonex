@@ -86,14 +86,18 @@ async def _run_webhook(bot: Bot, dp: Dispatcher, scheduler):
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
     webhook_path = "/webhook"
-    webhook_url = f"{settings.WEBHOOK_URL.rstrip('/')}{webhook_path}"
+    base = settings.WEBHOOK_URL.strip().rstrip("/")
+    if not base.startswith(("https://", "http://")):
+        logger.error("[Webhook] WEBHOOK_URL must start with https:// — got %r", base)
+        raise SystemExit(1)
+    webhook_url = f"{base}{webhook_path}"
+    logger.info("[Webhook] Setting to %s", webhook_url)
 
     await bot.set_webhook(
         webhook_url,
         drop_pending_updates=True,
         allowed_updates=dp.resolve_used_update_types(),
     )
-    logger.info("[Webhook] Set to %s", webhook_url)
 
     app = web.Application()
 
