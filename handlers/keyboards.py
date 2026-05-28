@@ -1,17 +1,12 @@
-from aiogram.types import (
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-def main_menu() -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardBuilder()
-    kb.row(KeyboardButton(text="🛒 Маркет"), KeyboardButton(text="➕ Продать"))
-    kb.row(KeyboardButton(text="📦 Мои покупки"), KeyboardButton(text="📋 Мои товары"))
-    kb.row(KeyboardButton(text="💼 Кошелёк"), KeyboardButton(text="👥 Реферальная"))
-    return kb.as_markup(resize_keyboard=True)
+# main_menu теперь в handlers/start.py (зависит от языка пользователя)
+def main_menu(user: dict = None):
+    """Импортируй из handlers.start. Этот stub для обратной совместимости."""
+    from handlers.start import main_menu as _mm
+    return _mm(user or {})
 
 
 def listing_card(listing_id: int, seller_user_id: int) -> InlineKeyboardMarkup:

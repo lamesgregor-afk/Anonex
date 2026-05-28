@@ -94,6 +94,12 @@ class Database:
             await _seed_categories(db)
             await _set_user_version(db, 3)
             await db.commit()
+            version = 3
+
+        if version < 4:
+            await db.executescript(_SCHEMA_V4)
+            await _set_user_version(db, 4)
+            await db.commit()
 
 
 _SCHEMA_V1 = """
@@ -314,3 +320,8 @@ async def _seed_categories(db):
             "INSERT INTO categories (parent_id, name, emoji, sort_order) VALUES (?, ?, ?, 100)",
             (parent_id, name, emoji),
         )
+
+
+_SCHEMA_V4 = """
+ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT 'en';
+"""

@@ -143,6 +143,12 @@ class UserService:
         return dict(row) if row else None
 
     @staticmethod
+    async def set_lang(user_id: int, lang: str) -> None:
+        db = await get_db()
+        await db.execute("UPDATE users SET lang = ? WHERE id = ?", (lang, user_id))
+        await db.commit()
+
+    @staticmethod
     async def count_referrals(user_id: int) -> int:
         db = await get_db()
         async with db.execute(
