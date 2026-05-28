@@ -84,7 +84,7 @@ class CryptoService:
         payload = {
             "asset": "USDT",
             "amount": amount_str,
-            "description": description or f"GhostMarket order #{order_id}",
+            "description": description or f"Anonex order #{order_id}",
             "payload": str(order_id),
             "paid_btn_name": "callback",
             "paid_btn_url": paid_btn_url,
@@ -144,8 +144,8 @@ class CryptoService:
             "user_id": tg_user_id,
             "asset": "USDT",
             "amount": _micro_to_str(amount_micro),
-            "comment": comment or "GhostMarket payout",
-            "spend_id": f"gm_w{withdrawal_id}",
+            "comment": comment or "Anonex payout",
+            "spend_id": f"anx_w{withdrawal_id}",
         }
         try:
             session = await _get_session()

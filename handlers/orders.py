@@ -73,7 +73,7 @@ async def buy_listing(callback: CallbackQuery, user: dict, bot: Bot):
     invoice = await CryptoService.create_invoice(
         amount_micro=listing["price"],
         order_id=order["id"],
-        description=f"{listing['title'][:50]} — GhostMarket #{order['id']}",
+        description=f"{listing['title'][:50]} — Anonex #{order['id']}",
         bot_username=app_state.bot_username,
     )
     if not invoice:
@@ -268,6 +268,10 @@ async def confirm_receipt(callback: CallbackQuery, user: dict, bot: Bot):
 
     await callback.message.edit_text(f"✅ Заказ #{order_id} завершён. Спасибо!")
     await callback.answer()
+
+    # Запрашиваем отзыв
+    from .reviews import request_review
+    await request_review(bot, user["tg_id"], order_id)
 
 
 async def release_funds(order: dict, bot: Bot):

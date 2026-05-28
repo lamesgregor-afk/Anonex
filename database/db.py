@@ -1,12 +1,6 @@
 """
-database/db.py
-
-Изменения:
-- Добавлен async-context `transaction()` для атомарных мульти-стейтментов
-- Колонка orders.funds_released — флаг "деньги в pending у продавца уже начислены"
-  → release_funds становится идемпотентной, защищена от частичных сбоев
-- Простая система миграций через user_version PRAGMA
-- DB_PATH читается из env DB_PATH (для Railway volume)
+database/db.py — миграции v1 + v2.
+v2 добавляет таблицу reviews и индексы.
 """
 import os
 import aiosqlite
@@ -14,15 +8,14 @@ import asyncio
 import contextlib
 from typing import Optional
 
-DB_PATH = os.getenv("DB_PATH", "ghostmarket.db")
+DB_PATH = os.getenv("DB_PATH", "anonex.db")
 
 _db: Optional[aiosqlite.Connection] = None
 _db_lock = asyncio.Lock()
-_write_lock = asyncio.Lock()  # сериализуем write-операции (SQLite single-writer)
+_write_lock = asyncio.Lock()
 
 
 def to_micro(usdt: float) -> int:
-    """USDT → микро-USDT (int) через Decimal — без float-погрешностей."""
     from decimal import Decimal, ROUND_HALF_UP
     return int(
         Decimal(str(usdt)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
@@ -31,7 +24,6 @@ def to_micro(usdt: float) -> int:
 
 
 def fmt(micro: int, decimals: int = 4) -> str:
-    """Микро-USDT → строка для UI: '1.2345'."""
     from decimal import Decimal
     if decimals <= 0:
         return str(int(Decimal(micro) / Decimal(1_000_000)))
@@ -57,16 +49,6 @@ async def get_db() -> aiosqlite.Connection:
 
 @contextlib.asynccontextmanager
 async def transaction():
-    """
-    Атомарная транзакция. Используется для связки операций,
-    которые должны выполниться вместе или не выполниться вообще.
-
-    Пример:
-        async with transaction() as db:
-            await db.execute("UPDATE ... ")
-            await db.execute("INSERT ...")
-        # commit / rollback автоматически
-    """
     db = await get_db()
     async with _write_lock:
         try:
@@ -78,11 +60,6 @@ async def transaction():
             raise
 
 
-# ─── Миграции ───────────────────────────────────────────────────────────────
-
-CURRENT_VERSION = 1
-
-
 async def _get_user_version(db) -> int:
     async with db.execute("PRAGMA user_version") as cur:
         row = await cur.fetchone()
@@ -90,11 +67,8 @@ async def _get_user_version(db) -> int:
 
 
 async def _set_user_version(db, version: int):
-    # PRAGMA не принимает параметры — но version это int, безопасно через f-string
     await db.execute(f"PRAGMA user_version = {int(version)}")
 
-
-# ─── Schema bootstrap ────────────────────────────────────────────────────────
 
 class Database:
 
@@ -107,10 +81,22 @@ class Database:
             await db.executescript(_SCHEMA_V1)
             await _set_user_version(db, 1)
             await db.commit()
+            version = 1
+
+        if version < 2:
+            await db.executescript(_SCHEMA_V2)
+            await _set_user_version(db, 2)
+            await db.commit()
+            version = 2
+
+        if version < 3:
+            await db.executescript(_SCHEMA_V3)
+            await _seed_categories(db)
+            await _set_user_version(db, 3)
+            await db.commit()
 
 
 _SCHEMA_V1 = """
--- Пользователи
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id           INTEGER UNIQUE NOT NULL,
@@ -123,7 +109,6 @@ CREATE TABLE IF NOT EXISTS users (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Объявления
 CREATE TABLE IF NOT EXISTS listings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     seller_id   INTEGER NOT NULL REFERENCES users(id),
@@ -136,9 +121,6 @@ CREATE TABLE IF NOT EXISTS listings (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Заказы
--- funds_released: 0 — деньги ещё не разнесены продавцу/рефереру; 1 — разнесены
---                 защищает от частичной выплаты при крэше между UPDATE status и release_funds
 CREATE TABLE IF NOT EXISTS orders (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     listing_id          INTEGER NOT NULL REFERENCES listings(id),
@@ -161,7 +143,6 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Транзакции
 CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL REFERENCES users(id),
@@ -172,7 +153,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Заявки на вывод
 CREATE TABLE IF NOT EXISTS withdrawals (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL REFERENCES users(id),
@@ -184,7 +164,6 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Споры
 CREATE TABLE IF NOT EXISTS disputes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id    INTEGER UNIQUE NOT NULL REFERENCES orders(id),
@@ -207,3 +186,131 @@ CREATE INDEX IF NOT EXISTS idx_orders_pending_pair ON orders(buyer_id, listing_i
 CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user   ON transactions(user_id);
 """
+
+_SCHEMA_V2 = """
+-- Отзывы
+-- Один отзыв на сделку. Только покупатель → продавец.
+CREATE TABLE IF NOT EXISTS reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id    INTEGER UNIQUE NOT NULL REFERENCES orders(id),
+    reviewer_id INTEGER NOT NULL REFERENCES users(id),
+    target_id   INTEGER NOT NULL REFERENCES users(id),
+    rating      INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    text        TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_target ON reviews(target_id);
+CREATE INDEX IF NOT EXISTS idx_listings_active_created ON listings(is_active, created_at);
+"""
+
+_SCHEMA_V3 = """
+-- Динамические категории и подкатегории.
+-- parent_id NULL = корневая категория ("Игры", "Telegram", "Соцсети")
+-- parent_id != NULL = подкатегория ("Brawl Stars" внутри "Игры")
+CREATE TABLE IF NOT EXISTS categories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id   INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    emoji       TEXT NOT NULL DEFAULT '🔖',
+    sort_order  INTEGER NOT NULL DEFAULT 100,
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id, is_active, sort_order);
+
+-- Предложения новых категорий от пользователей
+CREATE TABLE IF NOT EXISTS category_suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    suggested   TEXT NOT NULL,
+    parent_hint TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    -- pending | approved | rejected
+    admin_note  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON category_suggestions(status);
+
+-- Привязка листинга к категории через id (старая колонка category остаётся для совместимости)
+ALTER TABLE listings ADD COLUMN category_id INTEGER REFERENCES categories(id);
+CREATE INDEX IF NOT EXISTS idx_listings_category ON listings(category_id, is_active);
+"""
+
+
+async def _seed_categories(db):
+    """Стартовый набор категорий и подкатегорий."""
+    seed = [
+        # (parent_name_or_None, name, emoji, sort)
+        (None, "Telegram", "✈️", 10),
+        (None, "Игры", "🎮", 20),
+        (None, "Соцсети", "📱", 30),
+        (None, "Стриминг", "🎬", 40),
+        (None, "Криптовалюты", "₿", 50),
+        (None, "Файлы и софт", "📁", 60),
+        (None, "Консультации", "💬", 70),
+        (None, "Другое", "🔖", 999),
+    ]
+    parent_ids = {}
+    for _, name, emoji, sort in seed:
+        cur = await db.execute(
+            "INSERT INTO categories (parent_id, name, emoji, sort_order) VALUES (NULL, ?, ?, ?)",
+            (name, emoji, sort),
+        )
+        parent_ids[name] = cur.lastrowid
+
+    # Подкатегории
+    sub = [
+        # parent_name, name, emoji
+        ("Telegram", "Premium подписки", "⭐"),
+        ("Telegram", "Stars", "✨"),
+        ("Telegram", "Юзернеймы", "🆔"),
+        ("Telegram", "Каналы и группы", "📢"),
+
+        ("Игры", "Brawl Stars", "💥"),
+        ("Игры", "Standoff 2", "🔫"),
+        ("Игры", "Clash Royale", "👑"),
+        ("Игры", "Clash of Clans", "🏰"),
+        ("Игры", "PUBG Mobile", "🪖"),
+        ("Игры", "Mobile Legends", "🗡"),
+        ("Игры", "Genshin Impact", "🌸"),
+        ("Игры", "Roblox", "🟥"),
+        ("Игры", "Minecraft", "⛏"),
+        ("Игры", "Fortnite", "🌀"),
+        ("Игры", "Valorant", "🎯"),
+        ("Игры", "CS2 / CS:GO", "🔪"),
+        ("Игры", "Dota 2", "🛡"),
+        ("Игры", "World of Tanks", "🚜"),
+        ("Игры", "GTA Online", "🚗"),
+
+        ("Соцсети", "Instagram", "📷"),
+        ("Соцсети", "TikTok", "🎵"),
+        ("Соцсети", "YouTube", "▶️"),
+        ("Соцсети", "Twitter / X", "🐦"),
+        ("Соцсети", "Discord", "💬"),
+
+        ("Стриминг", "Spotify", "🎧"),
+        ("Стриминг", "Netflix", "🎞"),
+        ("Стриминг", "YouTube Premium", "🔴"),
+
+        ("Криптовалюты", "USDT", "💵"),
+        ("Криптовалюты", "BTC", "🟠"),
+        ("Криптовалюты", "TON", "💎"),
+
+        ("Файлы и софт", "Лицензии и ключи", "🔑"),
+        ("Файлы и софт", "VPN", "🛡"),
+        ("Файлы и софт", "Базы данных", "🗄"),
+
+        ("Консультации", "IT и разработка", "💻"),
+        ("Консультации", "Маркетинг", "📈"),
+        ("Консультации", "Юридические", "⚖️"),
+    ]
+    for parent_name, name, emoji in sub:
+        parent_id = parent_ids[parent_name]
+        await db.execute(
+            "INSERT INTO categories (parent_id, name, emoji, sort_order) VALUES (?, ?, ?, 100)",
+            (parent_id, name, emoji),
+        )

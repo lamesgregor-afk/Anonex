@@ -251,7 +251,81 @@ async def reject_withdrawal(callback: CallbackQuery, user: dict, bot: Bot):
     await callback.answer()
 
 
+# ─── Управление объявлениями ─────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:listings")
+async def admin_listings(callback: CallbackQuery, user: dict):
+    if not is_admin(user):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    from services.listing_service import ListingService, CATEGORY_EMOJI
+    from database.db import get_db as _get
+    from .keyboards import admin_listing_card
+
+    db = await _get()
+    async with db.execute(
+        """SELECT l.*, u.ghost_id as seller_ghost
+           FROM listings l JOIN users u ON l.seller_id = u.id
+           WHERE l.is_active = 1
+           ORDER BY l.created_at DESC LIMIT 10"""
+    ) as cur:
+        rows = await cur.fetchall()
+
+    if not rows:
+        await callback.answer("Активных объявлений нет.", show_alert=True)
+        return
+
+    await callback.message.answer("📋 <b>Активные объявления (10)</b>")
+    for lst in rows:
+        emoji = CATEGORY_EMOJI.get(lst["category"], "🔖")
+        await callback.message.answer(
+            f"{emoji} <b>{escape(lst['title'])}</b>\n"
+            f"ID: <code>{lst['id']}</code> | {fmt(lst['price'])} USDT\n"
+            f"👤 <code>{escape(lst['seller_ghost'])}</code> | {lst['created_at'][:10]}\n"
+            f"{escape(lst['description'][:200])}",
+            reply_markup=admin_listing_card(lst["id"]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_del:"))
+async def admin_delete_listing(callback: CallbackQuery, user: dict, bot: Bot):
+    if not is_admin(user):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    from services.listing_service import ListingService
+
+    listing_id = int(callback.data.split(":")[1])
+    listing = await ListingService.get_by_id(listing_id)
+    if not listing:
+        await callback.answer("Не найдено.", show_alert=True)
+        return
+
+    ok = await ListingService.admin_deactivate(listing_id)
+    if not ok:
+        await callback.answer("Не удалось.", show_alert=True)
+        return
+
+    # Уведомляем продавца
+    seller = await UserService.get_by_id(listing["seller_id"])
+    if seller:
+        try:
+            await bot.send_message(
+                seller["tg_id"],
+                f"🛑 Объявление «{escape(listing['title'])}» снято администратором.",
+            )
+        except Exception:
+            pass
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("✅ Удалено.", show_alert=True)
+
+
 # ─── Транзакции ───────────────────────────────────────────────────────────────
+
 
 @router.callback_query(F.data == "admin:transactions")
 async def admin_transactions(callback: CallbackQuery, user: dict):
@@ -302,3 +376,336 @@ async def unban_cmd(message: Message, user: dict):
     ghost_id = args[1].strip()
     ok = await AdminService.unban_user(ghost_id)
     await message.answer(f"{'✅ Разбанен' if ok else '❌ Не найден'}: {escape(ghost_id)}")
+
+
+
+# ─── Управление категориями ──────────────────────────────────────────────────
+
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from services.category_service import CategoryService
+
+
+class AdminCatState(StatesGroup):
+    new_root_name = State()
+    new_root_emoji = State()
+    new_sub_name = State()
+    rename = State()
+    approve_name = State()
+    approve_emoji = State()
+
+
+def _root_admin_kb():
+    """Список root-категорий с кнопками управления."""
+    return None  # рендерится отдельно
+
+
+@router.callback_query(F.data == "admin:categories")
+async def admin_categories(callback: CallbackQuery, user: dict):
+    if not is_admin(user):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    roots = await CategoryService.get_roots()
+    kb = InlineKeyboardBuilder()
+    for c in roots:
+        cnt = await CategoryService.count_listings(c["id"])
+        kb.button(
+            text=f"{c['emoji']} {c['name']} ({cnt})",
+            callback_data=f"adm_cat:open:{c['id']}",
+        )
+    kb.adjust(2)
+    kb.row()
+    kb.button(text="➕ Новая корневая", callback_data="adm_cat:new_root")
+    await callback.message.answer(
+        "📂 <b>Категории</b>\nВыбери для управления или создай новую:",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_cat:open:"))
+async def admin_cat_open(callback: CallbackQuery, user: dict):
+    if not is_admin(user):
+        return
+    cat_id = int(callback.data.split(":")[2])
+    cat = await CategoryService.get_by_id(cat_id)
+    if not cat:
+        await callback.answer("Не найдено.", show_alert=True)
+        return
+
+    children = await CategoryService.get_children(cat_id) if cat["parent_id"] is None else []
+
+    kb = InlineKeyboardBuilder()
+    if cat["parent_id"] is None:
+        # Root: показываем дочерние + действия
+        for ch in children:
+            kb.button(text=f"{ch['emoji']} {ch['name']}", callback_data=f"adm_cat:open:{ch['id']}")
+        kb.adjust(2)
+        kb.row()
+        kb.button(text="➕ Подкатегория", callback_data=f"adm_cat:new_sub:{cat_id}")
+    kb.row()
+    kb.button(text="✏️ Переименовать", callback_data=f"adm_cat:rename:{cat_id}")
+    kb.button(text="🛑 Деактивировать", callback_data=f"adm_cat:disable:{cat_id}")
+    kb.adjust(2)
+
+    path = await CategoryService.get_path(cat_id)
+    label = " → ".join(f"{p['emoji']} {p['name']}" for p in path)
+    cnt = await CategoryService.count_listings(cat_id)
+
+    await callback.message.answer(
+        f"📂 {escape(label)}\n"
+        f"ID: <code>{cat_id}</code> | Активных листингов: {cnt}\n"
+        + (f"Подкатегорий: {len(children)}\n" if cat["parent_id"] is None else ""),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_cat:new_root")
+async def admin_cat_new_root(callback: CallbackQuery, state: FSMContext, user: dict):
+    if not is_admin(user):
+        return
+    await state.set_state(AdminCatState.new_root_name)
+    await callback.message.answer("Название новой корневой категории:")
+    await callback.answer()
+
+
+@router.message(AdminCatState.new_root_name)
+async def admin_cat_new_root_name(message: Message, state: FSMContext, user: dict):
+    if not is_admin(user) or not message.text:
+        return
+    name = message.text.strip()[:60]
+    if not name:
+        await message.answer("Пустое.")
+        return
+    await state.update_data(name=name)
+    await state.set_state(AdminCatState.new_root_emoji)
+    await message.answer("Эмодзи (1 символ, например 🎮):")
+
+
+@router.message(AdminCatState.new_root_emoji)
+async def admin_cat_new_root_emoji(message: Message, state: FSMContext, user: dict):
+    if not is_admin(user) or not message.text:
+        return
+    emoji = message.text.strip()[:8] or "🔖"
+    data = await state.get_data()
+    cat = await CategoryService.create(name=data["name"], emoji=emoji, parent_id=None)
+    await state.clear()
+    await message.answer(f"✅ Создана: {cat['emoji']} {escape(cat['name'])} (ID {cat['id']})")
+
+
+@router.callback_query(F.data.startswith("adm_cat:new_sub:"))
+async def admin_cat_new_sub(callback: CallbackQuery, state: FSMContext, user: dict):
+    if not is_admin(user):
+        return
+    parent_id = int(callback.data.split(":")[2])
+    await state.update_data(parent_id=parent_id)
+    await state.set_state(AdminCatState.new_sub_name)
+    await callback.message.answer("Название подкатегории (можно с эмодзи в начале, напр. «🎯 Valorant»):")
+    await callback.answer()
+
+
+@router.message(AdminCatState.new_sub_name)
+async def admin_cat_new_sub_name(message: Message, state: FSMContext, user: dict):
+    if not is_admin(user) or not message.text:
+        return
+    raw = message.text.strip()
+    # Пробуем выделить эмодзи в начале
+    parts = raw.split(maxsplit=1)
+    emoji = "🔖"
+    name = raw
+    if len(parts) == 2 and len(parts[0]) <= 4:
+        emoji = parts[0]
+        name = parts[1]
+
+    data = await state.get_data()
+    cat = await CategoryService.create(name=name[:60], emoji=emoji, parent_id=data["parent_id"])
+    await state.clear()
+    await message.answer(f"✅ Подкатегория: {cat['emoji']} {escape(cat['name'])} (ID {cat['id']})")
+
+
+@router.callback_query(F.data.startswith("adm_cat:rename:"))
+async def admin_cat_rename_start(callback: CallbackQuery, state: FSMContext, user: dict):
+    if not is_admin(user):
+        return
+    cat_id = int(callback.data.split(":")[2])
+    await state.update_data(rename_id=cat_id)
+    await state.set_state(AdminCatState.rename)
+    await callback.message.answer(
+        "Введи новое название (можно «🎮 Имя» с эмодзи в начале):"
+    )
+    await callback.answer()
+
+
+@router.message(AdminCatState.rename)
+async def admin_cat_rename_save(message: Message, state: FSMContext, user: dict):
+    if not is_admin(user) or not message.text:
+        return
+    data = await state.get_data()
+    cat_id = data.get("rename_id")
+    raw = message.text.strip()
+    parts = raw.split(maxsplit=1)
+    emoji = None
+    name = raw
+    if len(parts) == 2 and len(parts[0]) <= 4:
+        emoji = parts[0]
+        name = parts[1]
+    ok = await CategoryService.rename(cat_id, name[:60], emoji)
+    await state.clear()
+    await message.answer("✅ Переименовано." if ok else "❌ Не удалось.")
+
+
+@router.callback_query(F.data.startswith("adm_cat:disable:"))
+async def admin_cat_disable(callback: CallbackQuery, user: dict):
+    if not is_admin(user):
+        return
+    cat_id = int(callback.data.split(":")[2])
+    ok = await CategoryService.deactivate(cat_id)
+    await callback.answer("✅ Деактивирована" if ok else "❌", show_alert=True)
+
+
+# ─── Заявки на категории ─────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin:suggestions")
+async def admin_suggestions(callback: CallbackQuery, user: dict):
+    if not is_admin(user):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    items = await CategoryService.get_pending_suggestions(limit=10)
+    if not items:
+        await callback.answer("Заявок нет.", show_alert=True)
+        return
+    for s in items:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Принять", callback_data=f"sug:approve:{s['id']}")
+        kb.button(text="❌ Отклонить", callback_data=f"sug:reject:{s['id']}")
+        kb.adjust(2)
+        await callback.message.answer(
+            f"💡 <b>Заявка #{s['id']}</b>\n"
+            f"От: <code>{escape(s['ghost_id'])}</code>\n"
+            f"Название: «{escape(s['suggested'])}»\n"
+            f"<i>{s['created_at'][:16]}</i>",
+            reply_markup=kb.as_markup(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sug:approve:"))
+async def admin_sug_approve(callback: CallbackQuery, state: FSMContext, user: dict):
+    if not is_admin(user):
+        return
+    sug_id = int(callback.data.split(":")[2])
+    sug = await CategoryService.get_suggestion(sug_id)
+    if not sug or sug["status"] != "pending":
+        await callback.answer("Уже обработана.", show_alert=True)
+        return
+
+    # Покажем root-категории чтобы выбрать куда добавить
+    roots = await CategoryService.get_roots()
+    kb = InlineKeyboardBuilder()
+    for r in roots:
+        kb.button(text=f"{r['emoji']} {r['name']}", callback_data=f"sug_to:{sug_id}:{r['id']}")
+    kb.adjust(2)
+    kb.row()
+    kb.button(text="➕ Как корневую", callback_data=f"sug_to:{sug_id}:0")
+    await callback.message.answer(
+        f"Куда добавить «{escape(sug['suggested'])}»?",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sug_to:"))
+async def admin_sug_place(callback: CallbackQuery, state: FSMContext, user: dict, bot: Bot):
+    if not is_admin(user):
+        return
+    parts = callback.data.split(":")
+    sug_id = int(parts[1])
+    parent_id = int(parts[2])  # 0 = root
+    sug = await CategoryService.get_suggestion(sug_id)
+    if not sug or sug["status"] != "pending":
+        await callback.answer("Уже обработана.", show_alert=True)
+        return
+
+    await state.update_data(sug_id=sug_id, parent_id=(parent_id or None))
+    await state.set_state(AdminCatState.approve_name)
+    await callback.message.answer(
+        f"Заявка: «{escape(sug['suggested'])}»\n\n"
+        f"Введи финальное название (можно с эмодзи в начале) "
+        f"или просто <b>=</b> чтобы принять как есть:",
+    )
+    await callback.answer()
+
+
+@router.message(AdminCatState.approve_name)
+async def admin_sug_approve_save(message: Message, state: FSMContext, user: dict, bot: Bot):
+    if not is_admin(user) or not message.text:
+        return
+    data = await state.get_data()
+    sug_id = data["sug_id"]
+    parent_id = data.get("parent_id")
+
+    sug = await CategoryService.get_suggestion(sug_id)
+    if not sug:
+        await state.clear()
+        await message.answer("Заявка пропала.")
+        return
+
+    raw = message.text.strip()
+    if raw == "=":
+        name = sug["suggested"]
+        emoji = "🔖"
+    else:
+        parts = raw.split(maxsplit=1)
+        if len(parts) == 2 and len(parts[0]) <= 4:
+            emoji = parts[0]
+            name = parts[1]
+        else:
+            emoji = "🔖"
+            name = raw
+
+    cat = await CategoryService.create(name=name[:60], emoji=emoji, parent_id=parent_id)
+    await CategoryService.update_suggestion_status(sug_id, "approved", f"Created cat #{cat['id']}")
+    await state.clear()
+
+    # Уведомляем юзера
+    try:
+        await bot.send_message(
+            sug["tg_id"],
+            f"✅ Твоя заявка «{escape(sug['suggested'])}» одобрена!\n"
+            f"Добавлена категория {cat['emoji']} {escape(cat['name'])}.",
+        )
+    except Exception:
+        pass
+
+    await message.answer(
+        f"✅ Категория создана: {cat['emoji']} {escape(cat['name'])} (ID {cat['id']})"
+    )
+
+
+@router.callback_query(F.data.startswith("sug:reject:"))
+async def admin_sug_reject(callback: CallbackQuery, user: dict, bot: Bot):
+    if not is_admin(user):
+        return
+    sug_id = int(callback.data.split(":")[2])
+    sug = await CategoryService.get_suggestion(sug_id)
+    if not sug:
+        await callback.answer("Не найдено.", show_alert=True)
+        return
+    ok = await CategoryService.update_suggestion_status(sug_id, "rejected", "Admin rejected")
+    if not ok:
+        await callback.answer("Уже обработана.", show_alert=True)
+        return
+    try:
+        await bot.send_message(
+            sug["tg_id"],
+            f"❌ Заявка на категорию «{escape(sug['suggested'])}» отклонена.",
+        )
+    except Exception:
+        pass
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Отклонено.")

@@ -31,6 +31,9 @@ async def auto_confirm_orders(bot: Bot):
                         f"⏰ Заказ #{order['id']} авто-подтверждён (48ч).")
                 except Exception:
                     pass
+                # Предложить оценить
+                from handlers.reviews import request_review
+                await request_review(bot, buyer["tg_id"], order["id"])
             logger.info("[sched] Auto-confirmed #%d", order["id"])
         except Exception:
             logger.exception("[sched] auto_confirm error #%d", order["id"])
@@ -83,6 +86,14 @@ async def unlock_pending_balances(bot: Bot):
             logger.exception("[sched] unlock error #%d", order["id"])
 
 
+async def expire_old_listings(bot: Bot):
+    """Деактивирует объявления старше 30 дней."""
+    from services.listing_service import ListingService
+    affected = await ListingService.expire_old(days=30)
+    if affected:
+        logger.info("[sched] Expired %d old listings", affected)
+
+
 def create_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -99,6 +110,11 @@ def create_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler.add_job(
         unlock_pending_balances, "interval", hours=1,
         kwargs={"bot": bot}, id="unlock_balances",
+        replace_existing=True, max_instances=1,
+    )
+    scheduler.add_job(
+        expire_old_listings, "interval", hours=6,
+        kwargs={"bot": bot}, id="expire_listings",
         replace_existing=True, max_instances=1,
     )
 

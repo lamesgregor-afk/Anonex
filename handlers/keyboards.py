@@ -14,15 +14,23 @@ def main_menu() -> ReplyKeyboardMarkup:
     return kb.as_markup(resize_keyboard=True)
 
 
-def listing_card(listing_id: int) -> InlineKeyboardMarkup:
+def listing_card(listing_id: int, seller_user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="💰 Купить", callback_data=f"buy:{listing_id}")
+    kb.button(text="⭐ Отзывы продавца", callback_data=f"reviews:{seller_user_id}")
+    kb.adjust(1)
     return kb.as_markup()
 
 
 def my_listing_card(listing_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🗑 Снять с продажи", callback_data=f"del_listing:{listing_id}")
+    return kb.as_markup()
+
+
+def admin_listing_card(listing_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🛑 Удалить (админ)", callback_data=f"admin_del:{listing_id}")
     return kb.as_markup()
 
 
@@ -59,6 +67,16 @@ def seller_deliver_button(order_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def review_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    """Звёзды 1-5 + skip."""
+    kb = InlineKeyboardBuilder()
+    for i in range(1, 6):
+        kb.button(text="⭐" * i, callback_data=f"rate:{order_id}:{i}")
+    kb.button(text="Пропустить", callback_data=f"rate:{order_id}:0")
+    kb.adjust(5, 1)
+    return kb.as_markup()
+
+
 def wallet_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📤 Вывести средства", callback_data="withdraw")
@@ -72,6 +90,9 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
     kb.button(text="⚠️ Споры", callback_data="admin:disputes")
     kb.button(text="💸 Выводы", callback_data="admin:withdrawals")
     kb.button(text="📊 Транзакции", callback_data="admin:transactions")
+    kb.button(text="📋 Объявления", callback_data="admin:listings")
+    kb.button(text="📂 Категории", callback_data="admin:categories")
+    kb.button(text="💡 Заявки", callback_data="admin:suggestions")
     kb.button(text="📈 Статистика", callback_data="admin:stats")
     kb.adjust(2)
     return kb.as_markup()
