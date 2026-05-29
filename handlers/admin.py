@@ -41,15 +41,11 @@ async def admin_stats(callback: CallbackQuery, user: dict):
     if not is_admin(user):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    s = await AdminService.get_stats()
-    await callback.message.edit_text(
-        f"📈 <b>Статистика</b>\n\n"
-        f"👤 {s['total_users']} | 📋 {s['active_listings']} | 📦 {s['total_orders']}\n"
-        f"💰 Оборот: <b>{fmt(s['total_volume_micro'])} USDT</b>\n"
-        f"💸 Комиссии: <b>{fmt(s['platform_fees_micro'])} USDT</b>\n"
-        f"⚠️ {s['open_disputes']} споров | 📤 {s['pending_withdrawals']} выводов",
-        reply_markup=admin_main_keyboard(),
-    )
+    from services.stats_service import StatsService
+    lang = user.get("lang", "en")
+    report = await StatsService.generate_report_text(lang)
+    # Отправляем новым сообщением (отчёт длинный)
+    await callback.message.answer(report, reply_markup=admin_main_keyboard())
     await callback.answer()
 
 

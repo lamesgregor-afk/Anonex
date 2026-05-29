@@ -102,6 +102,29 @@ async def withdraw_wallet(message: Message, state: FSMContext, user: dict, bot: 
         await message.answer("Сессия устарела. Начни заново.")
         return
 
+    # Cooldown: нельзя выводить первые 24ч после первой сделки
+    fresh_check = await UserService.get_by_id(user["id"])
+    if fresh_check.get("first_deal_at"):
+        from datetime import datetime, timezone, timedelta
+        try:
+            first = datetime.fromisoformat(fresh_check["first_deal_at"])
+            if first.tzinfo is None:
+                first = first.replace(tzinfo=timezone.utc)
+            cooldown_end = first + timedelta(hours=24)
+            now = datetime.now(timezone.utc)
+            if now < cooldown_end:
+                await state.clear()
+                lang = user.get("lang", "en")
+                remaining = int((cooldown_end - now).total_seconds() / 3600) + 1
+                await message.answer(
+                    f"⏳ Withdrawal locked for {remaining}h after your first deal (anti-fraud)."
+                    if lang == "en" else
+                    f"⏳ Вывод заблокирован на {remaining}ч после первой сделки (защита от мошенничества)."
+                )
+                return
+        except Exception:
+            pass
+
     # Атомарно: списываем баланс + создаём заявку в одной транзакции
     try:
         async with transaction() as db:

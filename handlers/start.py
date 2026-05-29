@@ -13,25 +13,29 @@ router = Router()
 
 
 def main_menu(user: dict) -> ReplyKeyboardMarkup:
-    """Меню на языке пользователя."""
+    lang = user.get("lang", "en")
     kb = ReplyKeyboardBuilder()
     kb.row(
-        KeyboardButton(text=i18n.get(user, "btn_market")),
-        KeyboardButton(text=i18n.get(user, "btn_sell")),
+        KeyboardButton(text="🛒 Market" if lang == "en" else "🛒 Маркет"),
+        KeyboardButton(text="🔍 Search" if lang == "en" else "🔍 Поиск"),
     )
     kb.row(
-        KeyboardButton(text=i18n.get(user, "btn_purchases")),
-        KeyboardButton(text=i18n.get(user, "btn_listings")),
+        KeyboardButton(text="➕ Sell" if lang == "en" else "➕ Продать"),
+        KeyboardButton(text="📦 My Purchases" if lang == "en" else "📦 Мои покупки"),
     )
     kb.row(
-        KeyboardButton(text=i18n.get(user, "btn_wallet")),
-        KeyboardButton(text=i18n.get(user, "btn_referral")),
+        KeyboardButton(text="📋 My Listings" if lang == "en" else "📋 Мои товары"),
+        KeyboardButton(text="💼 Wallet" if lang == "en" else "💼 Кошелёк"),
     )
-    kb.row(KeyboardButton(text=i18n.get(user, "btn_language")))
+    kb.row(
+        KeyboardButton(text="👥 Referral" if lang == "en" else "👥 Реферальная"),
+        KeyboardButton(text="🔔 Subscriptions" if lang == "en" else "🔔 Подписки"),
+    )
+    kb.row(KeyboardButton(text="🌐 Interface language" if lang == "en" else "🌐 Язык интерфейса"))
     return kb.as_markup(resize_keyboard=True)
 
 
-def lang_keyboard() -> "InlineKeyboardMarkup":
+def lang_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="🇬🇧 English", callback_data="setlang:en")
     kb.button(text="🇷🇺 Русский", callback_data="setlang:ru")
@@ -39,16 +43,35 @@ def lang_keyboard() -> "InlineKeyboardMarkup":
     return kb.as_markup()
 
 
+_ALL_MENU_TEXTS = {
+    "🛒 Market", "🛒 Маркет",
+    "🔍 Search", "🔍 Поиск",
+    "➕ Sell", "➕ Продать",
+    "📦 My Purchases", "📦 Мои покупки",
+    "📋 My Listings", "📋 Мои товары",
+    "💼 Wallet", "💼 Кошелёк",
+    "👥 Referral", "👥 Реферальная",
+    "🔔 Subscriptions", "🔔 Подписки",
+    "🌐 Interface language", "🌐 Язык интерфейса",
+}
+
+
+def get_all_menu_texts():
+    return _ALL_MENU_TEXTS
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, user: dict, state: FSMContext):
-    await state.clear()  # сбрасываем любой FSM при /start
+    await state.clear()
     summary = await ReviewService.get_user_summary(user["id"])
     rating_line = (
         i18n.get(user, "start_rating", avg=summary["avg"], count=summary["count"])
         if summary["count"] > 0 else ""
     )
     await message.answer(
-        i18n.get(user, "start_welcome", ghost_id=escape(user["ghost_id"]), rating_line=rating_line),
+        i18n.get(user, "start_welcome",
+                 ghost_id=escape(user["ghost_id"]),
+                 rating_line=rating_line),
         reply_markup=main_menu(user),
     )
 
@@ -58,11 +81,12 @@ async def cmd_help(message: Message, user: dict):
     await message.answer(i18n.get(user, "help_text"))
 
 
-# ─── Язык ────────────────────────────────────────────────────────────────────
-
-@router.message(lambda m: m.text in ("🌐 Language", "🌐 Язык"))
+@router.message(F.text.in_({"🌐 Interface language", "🌐 Язык интерфейса"}))
 async def choose_language(message: Message, user: dict):
-    await message.answer("🌐 Choose language / Выбери язык:", reply_markup=lang_keyboard())
+    await message.answer(
+        "🌐 Choose interface language / Выбери язык интерфейса:",
+        reply_markup=lang_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("setlang:"))
@@ -72,7 +96,6 @@ async def set_language(callback: CallbackQuery, user: dict):
         await callback.answer()
         return
     await UserService.set_lang(user["id"], lang)
-    # Обновляем user dict для текущего запроса
     user["lang"] = lang
     await callback.message.answer(
         i18n.get(user, "lang_changed"),
@@ -81,9 +104,7 @@ async def set_language(callback: CallbackQuery, user: dict):
     await callback.answer()
 
 
-# ─── Реферальная ─────────────────────────────────────────────────────────────
-
-@router.message(lambda m: m.text in ("👥 Referral", "👥 Реферальная"))
+@router.message(F.text.in_({"👥 Referral", "👥 Реферальная"}))
 async def referral_info(message: Message, user: dict):
     bot_info = await message.bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={user['ghost_id']}"

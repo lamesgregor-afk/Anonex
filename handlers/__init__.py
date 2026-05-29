@@ -5,6 +5,9 @@ from .orders import router as orders_router
 from .wallet import router as wallet_router
 from .admin import router as admin_router
 from .reviews import router as reviews_router
+from .deal_chat import router as chat_router
+from .boost import router as boost_router
+from .search import router as search_router
 
 main_router = Router()
 main_router.include_router(start_router)
@@ -13,5 +16,8 @@ main_router.include_router(orders_router)
 main_router.include_router(wallet_router)
 main_router.include_router(admin_router)
 main_router.include_router(reviews_router)
+main_router.include_router(chat_router)
+main_router.include_router(boost_router)
+main_router.include_router(search_router)
 
 __all__ = ["main_router"]

@@ -364,6 +364,24 @@ async def listing_price(message: Message, state: FSMContext, user: dict):
     except ValueError:
         await message.answer(i18n.get(user, "sell_price_invalid"))
         return
+
+    # Лимит для новичков: < 5 завершённых сделок → макс 50 USDT
+    from database.db import to_micro
+    NEWBIE_LIMIT_USDT = 50.0
+    NEWBIE_DEALS_THRESHOLD = 5
+    if user.get("completed_sales", 0) < NEWBIE_DEALS_THRESHOLD and price > NEWBIE_LIMIT_USDT:
+        lang = user.get("lang", "en")
+        await message.answer(
+            f"⚠️ New sellers (< {NEWBIE_DEALS_THRESHOLD} completed deals) "
+            f"can list items up to {NEWBIE_LIMIT_USDT} USDT.\n"
+            f"Complete more deals to unlock higher prices."
+            if lang == "en" else
+            f"⚠️ Новым продавцам (< {NEWBIE_DEALS_THRESHOLD} завершённых сделок) "
+            f"доступна цена до {NEWBIE_LIMIT_USDT} USDT.\n"
+            f"Завершите больше сделок чтобы снять ограничение."
+        )
+        return
+
     await state.update_data(price=price)
     await state.set_state(CreateListing.root_cat)
     await message.answer(
@@ -481,6 +499,22 @@ async def listing_file(message: Message, state: FSMContext, user: dict):
         reply_markup=main_menu(user),
     )
 
+    # Уведомляем подписчиков категории
+    if listing.get("category_id"):
+        from services.subscription_service import SubscriptionService
+        tg_ids = await SubscriptionService.get_subscriber_tg_ids(listing["category_id"])
+        for tg_id in tg_ids:
+            if tg_id == user["tg_id"]:
+                continue
+            try:
+                await message.bot.send_message(
+                    tg_id,
+                    f"🔔 New listing in {escape(label)}:\n"
+                    f"<b>{escape(listing['title'])}</b> — {fmt(listing['price'])} USDT",
+                )
+            except Exception:
+                pass
+
 
 # ─── Предложить категорию (в любой момент) ───────────────────────────────────
 
@@ -522,23 +556,36 @@ async def suggest_cat_save(message: Message, state: FSMContext, user: dict, bot:
 @router.message(F.text.in_({"📋 My Listings", "📋 Мои товары"}))
 async def my_listings(message: Message, user: dict):
     listings = await ListingService.get_by_seller(user["id"], limit=MAX_LISTINGS_VIEW)
+    lang = user.get("lang", "en")
     if not listings:
-        from handlers.start import main_menu
         await message.answer(
-            "No listings yet." if user.get("lang") == "en" else "Объявлений нет. ➕",
+            "No listings yet. Use ➕ Sell." if lang == "en" else "Объявлений нет. ➕ Продать.",
         )
         return
     for lst in listings:
         status = "✅" if lst["is_active"] else "❌"
+        boost_mark = "🚀 " if lst.get("is_boosted") else ""
         cat_label = ""
         if lst["category_id"]:
             path = await CategoryService.get_path(lst["category_id"])
             if path:
                 cat_label = "\n📂 " + escape(" → ".join(f"{p['emoji']} {p['name']}" for p in path))
+
+        kb = None
+        if lst["is_active"]:
+            kb_b = InlineKeyboardBuilder()
+            kb_b.button(
+                text="🗑 Remove" if lang == "en" else "🗑 Снять",
+                callback_data=f"del_listing:{lst['id']}",
+            )
+            kb_b.button(text="🚀 Boost", callback_data=f"boost:{lst['id']}")
+            kb_b.adjust(2)
+            kb = kb_b.as_markup()
+
         await message.answer(
-            f"<b>{escape(lst['title'])}</b> — {fmt(lst['price'])} USDT{cat_label}\n"
+            f"{boost_mark}<b>{escape(lst['title'])}</b> — {fmt(lst['price'])} USDT{cat_label}\n"
             f"{status} ID: <code>{lst['id']}</code> | {lst['created_at'][:10]}",
-            reply_markup=my_listing_card(lst["id"]) if lst["is_active"] else None,
+            reply_markup=kb,
         )
 
 

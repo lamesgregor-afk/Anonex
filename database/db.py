@@ -100,6 +100,12 @@ class Database:
             await db.executescript(_SCHEMA_V4)
             await _set_user_version(db, 4)
             await db.commit()
+            version = 4
+
+        if version < 5:
+            await db.executescript(_SCHEMA_V5)
+            await _set_user_version(db, 5)
+            await db.commit()
 
 
 _SCHEMA_V1 = """
@@ -324,4 +330,96 @@ async def _seed_categories(db):
 
 _SCHEMA_V4 = """
 ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT 'en';
+"""
+
+
+_SCHEMA_V5 = """
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Анонимный чат внутри сделки
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS deal_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id    INTEGER NOT NULL REFERENCES orders(id),
+    sender_id   INTEGER NOT NULL REFERENCES users(id),
+    -- role: 'buyer' | 'seller'
+    role        TEXT NOT NULL,
+    text        TEXT,
+    file_id     TEXT,
+    file_type   TEXT,
+    -- 'text' | 'document' | 'photo' | 'video' | 'audio'
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dm_order ON deal_messages(order_id, created_at);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Подписки на категории
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS category_subscriptions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    category_id INTEGER NOT NULL REFERENCES categories(id),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cat_sub ON category_subscriptions(category_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Буст объявлений
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS listing_boosts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id  INTEGER NOT NULL REFERENCES listings(id),
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    amount_paid INTEGER NOT NULL,
+    -- длительность в часах
+    hours       INTEGER NOT NULL DEFAULT 24,
+    expires_at  TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_boost_listing ON listing_boosts(listing_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_boost_active  ON listing_boosts(expires_at) WHERE expires_at > datetime('now');
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Промокоды
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS promo_codes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    code            TEXT UNIQUE NOT NULL,
+    discount_pct    INTEGER NOT NULL DEFAULT 0,
+    -- скидка на комиссию платформы в %
+    max_uses        INTEGER NOT NULL DEFAULT 1,
+    used_count      INTEGER NOT NULL DEFAULT 0,
+    expires_at      TEXT,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS promo_uses (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    promo_id    INTEGER NOT NULL REFERENCES promo_codes(id),
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    order_id    INTEGER REFERENCES orders(id),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(promo_id, user_id)
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Новые поля через ALTER TABLE
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Счётчик завершённых сделок (продавец)
+ALTER TABLE users ADD COLUMN completed_sales INTEGER NOT NULL DEFAULT 0;
+-- Дата первой сделки (для cooldown вывода)
+ALTER TABLE users ADD COLUMN first_deal_at TEXT;
+
+-- Флаг «чат открыт» для ордера
+ALTER TABLE orders ADD COLUMN chat_enabled INTEGER NOT NULL DEFAULT 0;
+-- Флаг «покупатель подтвердил условия» (гарантийный период)
+ALTER TABLE orders ADD COLUMN buyer_confirmed_terms INTEGER NOT NULL DEFAULT 0;
+-- Применённый промокод
+ALTER TABLE orders ADD COLUMN promo_id INTEGER REFERENCES promo_codes(id);
+
+-- Буст-флаг на листинге (кэш)
+ALTER TABLE listings ADD COLUMN is_boosted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE listings ADD COLUMN boost_expires_at TEXT;
 """

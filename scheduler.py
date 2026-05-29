@@ -94,6 +94,14 @@ async def expire_old_listings(bot: Bot):
         logger.info("[sched] Expired %d old listings", affected)
 
 
+async def expire_boosts(bot: Bot):
+    """Снимает флаг is_boosted с истёкших бустов."""
+    from services.boost_service import BoostService
+    affected = await BoostService.expire_boosts()
+    if affected:
+        logger.info("[sched] Expired %d boosts", affected)
+
+
 def create_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -115,6 +123,11 @@ def create_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler.add_job(
         expire_old_listings, "interval", hours=6,
         kwargs={"bot": bot}, id="expire_listings",
+        replace_existing=True, max_instances=1,
+    )
+    scheduler.add_job(
+        expire_boosts, "interval", minutes=30,
+        kwargs={"bot": bot}, id="expire_boosts",
         replace_existing=True, max_instances=1,
     )
 

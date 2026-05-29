@@ -4,7 +4,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from database.db import fmt
+from database.db import fmt, get_db
 from app_state import app_state
 from services.listing_service import ListingService
 from services.order_service import OrderService
@@ -130,19 +130,34 @@ async def check_payment(callback: CallbackQuery, user: dict, bot: Bot):
     seller = await UserService.get_by_id(order["seller_id"])
     if seller:
         try:
+            from handlers.deal_chat import _open_chat_keyboard
             await bot.send_message(
                 seller["tg_id"],
-                f"💰 <b>Новая сделка #{order_id}</b>\n"
-                f"Сумма: {fmt(order['amount'])} USDT → тебе {fmt(order['net_to_seller'])} USDT\n"
-                f"Передай товар покупателю:",
+                i18n.get(seller, "order_seller_notif",
+                         id=order_id,
+                         amount=fmt(order["amount"]),
+                         net=fmt(order["net_to_seller"])),
                 reply_markup=seller_deliver_button(order_id),
+            )
+            # Кнопка чата продавцу
+            await bot.send_message(
+                seller["tg_id"],
+                "💬 You can chat with the buyer:" if seller.get("lang") == "en"
+                else "💬 Можешь написать покупателю:",
+                reply_markup=_open_chat_keyboard(order_id, seller.get("lang", "en")),
             )
         except Exception:
             pass
 
     await callback.message.edit_text(
-        f"✅ <b>Оплата подтверждена!</b>\n"
-        f"Заказ #{order_id} в эскроу. Жди товар от продавца.",
+        i18n.get(user, "order_paid_ok", id=order_id),
+    )
+    # Кнопка чата покупателю
+    from handlers.deal_chat import _open_chat_keyboard
+    await callback.message.answer(
+        "💬 You can chat with the seller:" if user.get("lang") == "en"
+        else "💬 Можешь написать продавцу:",
+        reply_markup=_open_chat_keyboard(order_id, user.get("lang", "en")),
     )
     await callback.answer()
 
@@ -292,6 +307,16 @@ async def release_funds(order: dict, bot: Bot):
 
     # Продавцу — в pending (hold 7 дней)
     await UserService.add_pending(seller["id"], order["net_to_seller"])
+    # Инкрементируем счётчик завершённых сделок продавца
+    db = await get_db()
+    await db.execute(
+        """UPDATE users
+           SET completed_sales = completed_sales + 1,
+               first_deal_at = COALESCE(first_deal_at, datetime('now'))
+           WHERE id = ?""",
+        (seller["id"],),
+    )
+    await db.commit()
     await OrderService.log_transaction(
         user_id=seller["id"], tx_type="escrow_release",
         amount_micro=order["net_to_seller"], order_id=order["id"],

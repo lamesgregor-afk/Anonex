@@ -11,9 +11,9 @@ def main_menu(user: dict = None):
 
 def listing_card(listing_id: int, seller_user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="💰 Купить", callback_data=f"buy:{listing_id}")
-    kb.button(text="⭐ Отзывы продавца", callback_data=f"reviews:{seller_user_id}")
-    kb.adjust(1)
+    kb.button(text="💰 Buy / Купить", callback_data=f"buy:{listing_id}")
+    kb.button(text="⭐ Reviews", callback_data=f"reviews:{seller_user_id}")
+    kb.adjust(2)
     return kb.as_markup()
 
 
